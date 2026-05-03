@@ -1,0 +1,742 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Travian Emoji: Imperial Conquest v2</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/gun/gun.js"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;900&display=swap');
+        body { font-family: 'Noto Sans TC', sans-serif; background: #0f172a; color: #e2e8f0; }
+        .map-grid { display: grid; grid-template-columns: repeat(10, 1fr); gap: 2px; background: #1e293b; }
+        .cell { aspect-ratio: 1/1; display: flex; flex-direction: column; align-items: center; justify-content: center; transition: 0.2s; cursor: pointer; position: relative; border-radius: 2px; }
+        .cell:hover { filter: brightness(1.6); transform: scale(1.08); z-index: 10; }
+        .cell.my-village { border: 2px solid #10b981; }
+        .cell.conquered { border: 2px solid #f59e0b; }
+        .scrollbar-hide::-webkit-scrollbar { display: none; }
+        .modal-bg { background: rgba(0,0,0,0.85); backdrop-filter: blur(4px); }
+        .tab-active { background: #1d4ed8; color: #fff; }
+        .tab-inactive { background: #1e293b; color: #94a3b8; }
+        .res-bar { height: 4px; background: #1e293b; border-radius: 2px; overflow: hidden; }
+        .res-fill { height: 100%; transition: width 0.3s; }
+        @keyframes pulse-red { 0%,100%{box-shadow:0 0 0 0 rgba(239,68,68,0.5)} 50%{box-shadow:0 0 12px 4px rgba(239,68,68,0.3)} }
+        .npc-pulse { animation: pulse-red 2s infinite; }
+    </style>
+</head>
+<body class="p-2 md:p-4">
+
+<div id="app" class="max-w-7xl mx-auto">
+
+    <!-- 頂部資訊欄 -->
+    <header class="bg-slate-800 p-3 rounded-2xl shadow-2xl border-b-4 border-slate-700 mb-4 flex flex-wrap justify-between items-center gap-2">
+        <div class="flex items-center space-x-3">
+            <div class="text-4xl">👑</div>
+            <div>
+                <h1 class="text-lg font-black text-yellow-500 uppercase tracking-wider">{{ playerName || '新領主' }}</h1>
+                <p class="text-[10px] text-slate-400">房間: {{ roomId }} | 英雄 Lv.{{ hero.level }} | 領地: {{ myTerritories.length }} 處</p>
+            </div>
+        </div>
+        
+        <div class="flex flex-wrap gap-2">
+            <div v-for="(v, k) in resources" :key="k" class="bg-slate-900 px-2 py-1 rounded-lg border border-slate-700 text-center min-w-[52px]">
+                <span class="text-base">{{ v.emoji }}</span>
+                <span class="block text-xs font-bold">{{ Math.floor(v.amount) }}</span>
+                <span class="text-[8px] text-green-500">+{{ totalRate(k) }}/s</span>
+            </div>
+        </div>
+
+        <div class="flex space-x-2">
+            <button @click="exportSave" class="bg-blue-600 hover:bg-blue-500 px-3 py-1 rounded text-xs font-bold">💾 匯出</button>
+            <button @click="triggerImport" class="bg-purple-600 hover:bg-purple-500 px-3 py-1 rounded text-xs font-bold">📂 匯入</button>
+        </div>
+    </header>
+
+    <!-- 登入界面 -->
+    <div v-if="!isJoined" class="fixed inset-0 z-50 bg-slate-900 flex items-center justify-center p-4">
+        <div class="bg-slate-800 p-8 rounded-3xl border-4 border-yellow-600 shadow-2xl w-full max-w-md text-center">
+            <h2 class="text-3xl font-black mb-2 text-yellow-500">⚔️ IMPERIAL CONQUEST</h2>
+            <p class="text-slate-400 text-sm mb-6">征服大陸，建立帝國</p>
+            <div class="space-y-4">
+                <input v-model="playerName" class="w-full bg-slate-700 p-3 rounded-xl outline-none border-2 border-transparent focus:border-yellow-500" placeholder="領主名稱">
+                <input v-model="roomId" class="w-full bg-slate-700 p-3 rounded-xl outline-none border-2 border-transparent focus:border-yellow-500" placeholder="戰場編號 (預設: W01)">
+                <button @click="joinGame" class="w-full bg-yellow-600 hover:bg-yellow-500 py-3 rounded-xl font-black text-lg transition">⚡ 進入戰場</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 領地管理彈窗 -->
+    <div v-if="showTerritoryPanel && selectedTerritory" class="fixed inset-0 z-40 modal-bg flex items-center justify-center p-4" @click.self="showTerritoryPanel=false">
+        <div class="bg-slate-800 rounded-2xl border-2 border-yellow-600 w-full max-w-lg max-h-[85vh] overflow-y-auto scrollbar-hide">
+            <div class="p-4 border-b border-slate-700 flex justify-between items-center">
+                <div>
+                    <h3 class="font-black text-yellow-400">🏰 {{ selectedTerritory.name || `領地 (${selectedTerritory.x},${selectedTerritory.y})` }}</h3>
+                    <p class="text-xs text-slate-400">地形: {{ terrainNames[selectedTerritory.terrain] }} | 發展度: {{ getTerritoryLevel(selectedTerritory) }}</p>
+                </div>
+                <button @click="showTerritoryPanel=false" class="text-slate-400 hover:text-white text-xl">✕</button>
+            </div>
+
+            <!-- 領地建設 tabs -->
+            <div class="p-4">
+                <div class="flex gap-2 mb-4">
+                    <button @click="territoryTab='build'" :class="['px-3 py-1 rounded text-xs font-bold', territoryTab==='build'?'tab-active':'tab-inactive']">🏗️ 建設</button>
+                    <button @click="territoryTab='info'" :class="['px-3 py-1 rounded text-xs font-bold', territoryTab==='info'?'tab-active':'tab-inactive']">📊 資訊</button>
+                </div>
+
+                <!-- 建設頁 -->
+                <div v-if="territoryTab==='build'" class="space-y-2">
+                    <p class="text-[10px] text-slate-500 mb-2">在此領地建造建築可提升該地產出與防禦</p>
+                    <div v-for="b in territoryBuildingTypes" :key="b.id" class="flex justify-between items-center p-2 bg-slate-900 rounded-xl border border-slate-800 hover:border-blue-500 transition">
+                        <div>
+                            <div class="text-sm font-bold">{{ b.emoji }} {{ b.name }}</div>
+                            <div class="text-[10px] text-slate-500">{{ b.desc }}</div>
+                            <div class="text-[10px] text-yellow-500">已建: {{ getTerritoryBuilding(selectedTerritory, b.id) }} | 費用: {{ getTerritoryBuildCost(b) }}🌾</div>
+                        </div>
+                        <button @click="buildInTerritory(selectedTerritory, b)" :disabled="resources.wheat.amount < getTerritoryBuildCost(b)" class="bg-blue-700 hover:bg-blue-600 px-3 py-1 rounded text-xs disabled:opacity-30 whitespace-nowrap">建造</button>
+                    </div>
+                </div>
+
+                <!-- 資訊頁 -->
+                <div v-if="territoryTab==='info'" class="space-y-2 text-sm">
+                    <div class="bg-slate-900 p-3 rounded-xl space-y-1">
+                        <div class="flex justify-between"><span class="text-slate-400">位置</span><span>({{ selectedTerritory.x }}, {{ selectedTerritory.y }})</span></div>
+                        <div class="flex justify-between"><span class="text-slate-400">地形加成</span><span class="text-green-400">{{ terrainBonuses[selectedTerritory.terrain] }}</span></div>
+                        <div class="flex justify-between"><span class="text-slate-400">防禦值</span><span class="text-blue-400">{{ getTerritoryDef(selectedTerritory) }}</span></div>
+                        <div class="flex justify-between"><span class="text-slate-400">資源加成</span><span class="text-yellow-400">+{{ getTerritoryResourceBonus(selectedTerritory) }}/s</span></div>
+                    </div>
+                    <div v-if="selectedTerritory.buildings && selectedTerritory.buildings.length" class="bg-slate-900 p-3 rounded-xl">
+                        <p class="text-xs text-slate-400 mb-2">已建建築：</p>
+                        <div v-for="bld in selectedTerritory.buildings" :key="bld.id" class="text-xs flex justify-between py-0.5">
+                            <span>{{ getBuildingEmoji(bld.id) }} {{ getBuildingName(bld.id) }}</span>
+                            <span class="text-slate-500">x{{ bld.count }}</span>
+                        </div>
+                    </div>
+                    <button @click="abandonTerritory(selectedTerritory)" class="w-full bg-red-900 hover:bg-red-800 py-2 rounded text-xs text-red-300">⚠️ 放棄此領地</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="grid grid-cols-1 lg:grid-cols-12 gap-4">
+        <!-- 左側 -->
+        <div class="lg:col-span-3 space-y-4">
+
+            <!-- 主城建設 -->
+            <section class="bg-slate-800 p-4 rounded-2xl border border-slate-700">
+                <h3 class="font-black text-blue-400 mb-3 flex justify-between items-center">
+                    🏛️ 主城建設
+                    <span class="text-xs text-slate-500 font-normal">總等 Lv.{{ totalLevel }}</span>
+                </h3>
+                <!-- Tab -->
+                <div class="flex gap-1 mb-3">
+                    <button @click="buildTab='resource'" :class="['flex-1 py-1 rounded text-[10px] font-bold', buildTab==='resource'?'tab-active':'tab-inactive']">資源</button>
+                    <button @click="buildTab='military'" :class="['flex-1 py-1 rounded text-[10px] font-bold', buildTab==='military'?'tab-active':'tab-inactive']">軍事</button>
+                    <button @click="buildTab='special'" :class="['flex-1 py-1 rounded text-[10px] font-bold', buildTab==='special'?'tab-active':'tab-inactive']">特殊</button>
+                </div>
+                <div class="space-y-2">
+                    <div v-for="b in filteredBuildings" :key="b.id" class="flex justify-between items-center p-2 bg-slate-900 rounded-xl border border-slate-800 hover:border-blue-500 transition">
+                        <div>
+                            <div class="text-sm font-bold">{{ b.emoji }} {{ b.name }}</div>
+                            <div class="text-[10px] text-slate-500">Lv.{{ b.level }} — {{ b.desc }}</div>
+                            <div class="text-[10px] text-yellow-600">費用: {{ b.cost }}🌾</div>
+                        </div>
+                        <button @click="upgrade(b)" :disabled="resources.wheat.amount < b.cost || (b.maxLevel && b.level >= b.maxLevel)" class="bg-blue-700 hover:bg-blue-600 px-2 py-1 rounded text-xs disabled:opacity-30 whitespace-nowrap">
+                            {{ b.maxLevel && b.level >= b.maxLevel ? '已滿' : '升級' }}
+                        </button>
+                    </div>
+                </div>
+            </section>
+
+            <!-- 軍事招募 -->
+            <section class="bg-slate-800 p-4 rounded-2xl border border-red-900/50">
+                <h3 class="font-black text-red-400 mb-3 flex justify-between items-center">
+                    ⚔️ 軍事招募
+                    <span class="text-xs text-slate-500 font-normal">總兵力: {{ totalTroops }}</span>
+                </h3>
+                <div class="space-y-2">
+                    <div v-for="t in availableTroopTypes" :key="t.id" class="flex justify-between items-center p-2 bg-slate-900 rounded-xl border border-slate-700 hover:border-red-500 transition">
+                        <div>
+                            <div class="text-sm font-bold">{{ t.emoji }} {{ t.name }}</div>
+                            <div class="text-[10px] text-slate-500">攻:{{ t.atk }} 防:{{ t.def }} | 持有:{{ troops[t.id]||0 }}</div>
+                        </div>
+                        <div class="text-right">
+                            <div class="text-[9px] text-slate-500 mb-1">{{ t.cost }}⛓️{{ t.food ? ' +'+t.food+'🌾' : '' }}</div>
+                            <button @click="train(t)" :disabled="!canTrain(t)" class="bg-red-800 hover:bg-red-700 px-2 py-1 rounded text-[10px] disabled:opacity-30">招募×1</button>
+                        </div>
+                    </div>
+                </div>
+                <div class="mt-3 space-y-1">
+                    <div class="text-[10px] text-yellow-500 bg-slate-900 rounded p-2 text-center">🛡️ 主城防禦加成: +{{ wallBonus }}%</div>
+                    <div v-if="troopUpkeep > 0" class="text-[10px] text-orange-400 bg-slate-900 rounded p-2 text-center">🌾 兵力維護: -{{ troopUpkeep }}/s</div>
+                </div>
+            </section>
+        </div>
+
+        <!-- 中間：地圖 -->
+        <div class="lg:col-span-6 space-y-3">
+            <div class="bg-slate-800 p-2 rounded-2xl shadow-inner">
+                <div class="flex justify-between items-center px-1 mb-2">
+                    <span class="text-xs text-slate-400">🗺️ 世界地圖 (點擊格子互動)</span>
+                    <div class="flex gap-2 text-[9px]">
+                        <span class="text-green-400">■ 我的領地</span>
+                        <span class="text-yellow-400">■ 佔領地</span>
+                        <span class="text-red-400">■ 敵人</span>
+                    </div>
+                </div>
+                <div class="map-grid rounded-lg overflow-hidden">
+                    <div v-for="(cell, idx) in worldMap" :key="idx"
+                         @click="interact(cell)"
+                         :class="['cell', { 'my-village': isMyCell(cell) && cell.isMain, 'conquered': isMyCell(cell) && !cell.isMain, 'npc-pulse': cell.type==='npc' }]"
+                         :style="`background: ${getCellBg(cell)}`">
+                        <span class="text-base leading-none">{{ getIcon(cell) }}</span>
+                        <div v-if="cell.owner && cell.type!=='wild'" class="absolute bottom-0 w-full bg-black/50 text-[7px] text-center truncate px-0.5">{{ cell.owner }}</div>
+                        <div v-if="isMyCell(cell) && getTerritoryLevel(cell)>0" class="absolute top-0 right-0 bg-yellow-600 text-[7px] rounded-bl px-0.5">{{ getTerritoryLevel(cell) }}</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 我的領地列表 -->
+            <div class="bg-slate-800 p-3 rounded-2xl border border-yellow-900/50">
+                <h3 class="font-black text-yellow-500 text-sm mb-2">🗺️ 我的領地 ({{ myTerritories.length }})</h3>
+                <div class="grid grid-cols-3 gap-2 max-h-28 overflow-y-auto scrollbar-hide">
+                    <div v-for="t in myTerritories" :key="t.id"
+                         @click="openTerritory(t)"
+                         class="bg-slate-900 rounded-lg p-2 cursor-pointer hover:border-yellow-500 border border-slate-700 transition text-center">
+                        <div class="text-lg">{{ t.isMain ? '🏰' : (t.type==='npc'?'⚔️':'🏯') }}</div>
+                        <div class="text-[9px] text-slate-400 truncate">({{ t.x }},{{ t.y }})</div>
+                        <div class="text-[8px] text-yellow-600">發展 {{ getTerritoryLevel(t) }}</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 戰鬥日誌 -->
+            <div class="bg-black p-3 rounded-xl border border-slate-700 h-36 overflow-y-auto scrollbar-hide text-xs font-mono">
+                <div v-for="(log, i) in logs" :key="i" class="mb-1 leading-relaxed">
+                    <span class="text-slate-600">[{{ log.time }}]</span>
+                    <span :class="log.color"> {{ log.msg }}</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- 右側 -->
+        <div class="lg:col-span-3 space-y-4">
+
+            <!-- 英雄 -->
+            <section class="bg-gradient-to-br from-yellow-900/40 to-slate-800 p-4 rounded-2xl border-2 border-yellow-600/50">
+                <h3 class="font-black text-yellow-500 mb-3">⚡ 英雄</h3>
+                <div class="space-y-2 text-xs">
+                    <div class="flex justify-between"><span>等級</span><span class="text-yellow-400 font-black">Lv.{{ hero.level }}</span></div>
+                    <div class="flex justify-between"><span>攻擊力</span><span class="text-red-400 font-bold">{{ hero.atk }}</span></div>
+                    <div class="flex justify-between"><span>統御力</span><span class="text-blue-400 font-bold">{{ hero.leadership }}</span></div>
+                    <div class="flex justify-between text-[10px] text-slate-400"><span>經驗值</span><span>{{ hero.exp }} / {{ hero.level * 120 }}</span></div>
+                    <div class="res-bar"><div class="res-fill bg-yellow-500" :style="`width:${Math.min((hero.exp/(hero.level*120))*100,100)}%`"></div></div>
+                    <div class="mt-2 bg-slate-900 rounded p-2 text-[10px]">
+                        <div class="text-slate-400 mb-1">英雄技能：</div>
+                        <div v-for="sk in hero.skills" :key="sk" class="text-green-400">✦ {{ sk }}</div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- 戰力分析 -->
+            <section class="bg-slate-800 p-4 rounded-2xl border border-slate-700">
+                <h3 class="font-black text-red-400 text-sm mb-2">⚔️ 戰力分析</h3>
+                <div class="space-y-1 text-xs">
+                    <div class="flex justify-between"><span class="text-slate-400">總攻擊力</span><span class="text-red-400 font-bold">{{ totalAttack }}</span></div>
+                    <div class="flex justify-between"><span class="text-slate-400">總防禦力</span><span class="text-blue-400 font-bold">{{ totalDefense }}</span></div>
+                    <div class="flex justify-between"><span class="text-slate-400">軍隊數量</span><span>{{ totalTroops }}</span></div>
+                    <div class="mt-2 res-bar"><div class="res-fill bg-red-600" :style="`width:${Math.min(totalAttack/10,100)}%`"></div></div>
+                </div>
+            </section>
+
+            <!-- 在線玩家 -->
+            <section class="bg-slate-800 p-4 rounded-2xl border border-slate-700">
+                <h3 class="font-black text-green-400 text-sm mb-2">🌐 在線領主 ({{ players.length }})</h3>
+                <div class="space-y-1 overflow-y-auto max-h-40 scrollbar-hide">
+                    <div v-for="p in players" :key="p.name" class="flex justify-between items-center text-xs p-2 bg-slate-900 rounded-lg">
+                        <span>🏰 {{ p.name }}</span>
+                        <span class="text-slate-500">{{ p.power }}</span>
+                    </div>
+                    <div v-if="!players.length" class="text-xs text-slate-600 text-center py-2">暫無其他領主</div>
+                </div>
+            </section>
+
+            <!-- 隨機事件 -->
+            <section v-if="currentEvent" class="bg-purple-900/40 p-3 rounded-2xl border border-purple-600/50">
+                <h3 class="font-black text-purple-400 text-sm mb-1">🌟 事件</h3>
+                <p class="text-xs text-purple-200">{{ currentEvent }}</p>
+            </section>
+        </div>
+    </div>
+
+    <input type="file" id="importInput" @change="handleFileImport" class="hidden" accept=".json">
+</div>
+
+<script>
+const { createApp } = Vue;
+const gun = Gun(['https://gun-manhattan.herokuapp.com/gun']);
+
+createApp({
+    data() {
+        return {
+            isJoined: false,
+            playerName: '',
+            roomId: 'W01',
+            buildTab: 'resource',
+            territoryTab: 'build',
+            showTerritoryPanel: false,
+            selectedTerritory: null,
+            currentEvent: null,
+
+            resources: {
+                wood:  { emoji: '🪵', amount: 800, rate: 5 },
+                clay:  { emoji: '🧱', amount: 800, rate: 5 },
+                iron:  { emoji: '⛓️', amount: 800, rate: 5 },
+                wheat: { emoji: '🌾', amount: 800, rate: 10 }
+            },
+
+            // ====== 8種主城建築 ======
+            buildings: [
+                // 資源類
+                { id: 'farm',       name: '農場',     emoji: '🌾', category: 'resource', level: 1, cost: 80,  desc: '提升糧食產量 +5/s',    maxLevel: 20 },
+                { id: 'sawmill',    name: '伐木場',   emoji: '🪵', category: 'resource', level: 1, cost: 90,  desc: '提升木材產量 +5/s',    maxLevel: 20 },
+                { id: 'ironmine',   name: '鐵礦場',   emoji: '⛏️', category: 'resource', level: 1, cost: 100, desc: '提升鐵礦產量 +5/s',    maxLevel: 20 },
+                // 軍事類
+                { id: 'barracks',   name: '兵營',     emoji: '⚔️', category: 'military', level: 0, cost: 150, desc: '解鎖高階兵種',          maxLevel: 10 },
+                { id: 'stable',     name: '馬廄',     emoji: '🐴', category: 'military', level: 0, cost: 200, desc: '解鎖騎兵與戰象',        maxLevel: 10 },
+                { id: 'wall',       name: '城牆',     emoji: '🛡️', category: 'military', level: 0, cost: 120, desc: '防禦加成 +20%/Lv',     maxLevel: 20 },
+                // 特殊類
+                { id: 'academy',    name: '學院',     emoji: '📚', category: 'special',  level: 0, cost: 300, desc: '英雄每次戰鬥多獲 20EXP', maxLevel: 5 },
+                { id: 'warehouse',  name: '倉庫',     emoji: '📦', category: 'special',  level: 1, cost: 100, desc: '提升資源上限',          maxLevel: 10 },
+            ],
+
+            // ====== 5種兵種 ======
+            troopTypes: [
+                { id: 'spearman',  name: '長矛兵', emoji: '🗡️', cost: 30,  foodCost: 1, atk: 10, def: 25, requires: null,           desc: '基礎步兵，防禦強' },
+                { id: 'swordsman', name: '劍士',   emoji: '⚔️', cost: 60,  foodCost: 1, atk: 30, def: 15, requires: 'barracks:3',   desc: '兵營Lv3解鎖，攻強' },
+                { id: 'cavalry',   name: '騎士',   emoji: '🐎', cost: 120, foodCost: 2, atk: 55, def: 30, requires: 'stable:1',     desc: '馬廄Lv1解鎖，機動' },
+                { id: 'archer',    name: '弓箭手', emoji: '🏹', cost: 80,  foodCost: 1, atk: 40, def: 10, requires: 'barracks:5',   desc: '兵營Lv5解鎖，遠程' },
+                { id: 'elephant',  name: '戰象',   emoji: '🐘', cost: 300, foodCost: 3, atk: 150,def: 80, requires: 'stable:5',    desc: '馬廄Lv5解鎖，精銳' },
+            ],
+
+            troops: { spearman: 0, swordsman: 0, cavalry: 0, archer: 0, elephant: 0 },
+
+            hero: {
+                level: 1,
+                exp: 0,
+                atk: 60,
+                leadership: 1,
+                skills: ['基礎指揮']
+            },
+
+            // ====== 領地可建建築 ======
+            territoryBuildingTypes: [
+                { id: 'outpost',   name: '前哨站', emoji: '🏯', desc: '提供基礎防禦 +30',      baseCost: 100 },
+                { id: 'tresfield', name: '資源田', emoji: '🌱', desc: '該地資源產出 +3/s',      baseCost: 80  },
+                { id: 'fortwall',  name: '要塞牆', emoji: '🧱', desc: '防禦 +50，減少損兵',     baseCost: 150 },
+                { id: 'barrackout',name: '外駐兵', emoji: '⛺', desc: '允許在此地駐紮部隊',     baseCost: 200 },
+            ],
+
+            worldMap: [],
+            players: [],
+            logs: [],
+
+            terrainNames: { plain: '平原', forest: '森林', mountain: '山地', lake: '湖泊' },
+            terrainBonuses: { plain: '無特殊', forest: '木材+2/s', mountain: '鐵礦+2/s', lake: '糧食+2/s' },
+        }
+    },
+
+    computed: {
+        totalLevel() { return this.buildings.reduce((s, b) => s + b.level, 0); },
+        wallBonus() {
+            const w = this.buildings.find(b => b.id === 'wall');
+            return w ? w.level * 20 : 0;
+        },
+        myTerritories() {
+            return this.worldMap.filter(c => c.owner === this.playerName);
+        },
+        totalTroops() {
+            return Object.values(this.troops).reduce((s, v) => s + v, 0);
+        },
+        totalAttack() {
+            let base = this.hero.atk;
+            this.troopTypes.forEach(t => { base += (this.troops[t.id]||0) * t.atk; });
+            return base;
+        },
+        totalDefense() {
+            let base = this.wallBonus;
+            this.troopTypes.forEach(t => { base += (this.troops[t.id]||0) * t.def; });
+            return base;
+        },
+        troopUpkeep() {
+            let u = 0;
+            this.troopTypes.forEach(t => { u += (this.troops[t.id]||0) * (t.foodCost||1); });
+            return u;
+        },
+        filteredBuildings() {
+            return this.buildings.filter(b => b.category === this.buildTab ||
+                (this.buildTab === 'resource' && ['farm','sawmill','ironmine'].includes(b.id)) ||
+                (this.buildTab === 'military' && ['barracks','stable','wall'].includes(b.id)) ||
+                (this.buildTab === 'special' && ['academy','warehouse'].includes(b.id))
+            );
+        },
+        availableTroopTypes() {
+            return this.troopTypes.filter(t => this.isTroopUnlocked(t));
+        },
+    },
+
+    methods: {
+        // ===== 初始化 =====
+        joinGame() {
+            if (!this.playerName) return alert('請輸入領主名稱');
+            this.isJoined = true;
+            this.initMap();
+            this.syncNetwork();
+            this.startLoop();
+            this.addLog(`📜 歷史將銘記領主 ${this.playerName} 的崛起。`, 'text-yellow-500');
+        },
+
+        initMap() {
+            const terrainPool = ['plain','plain','plain','plain','forest','forest','mountain','lake'];
+            this.worldMap = [];
+            for (let i = 0; i < 100; i++) {
+                const terrain = terrainPool[Math.floor(Math.random() * terrainPool.length)];
+                let type = 'wild', owner = '';
+                const r = Math.random();
+                if (r > 0.90) { type = 'npc'; owner = ['👹 哥布林王','🐉 龍巢','💀 骷髏軍'][Math.floor(Math.random()*3)]; }
+                this.worldMap.push({ id: i, type, owner, terrain, x: i%10, y: i/10|0, isMain: false, buildings: [] });
+            }
+            // 玩家起始點
+            let startIdx = Math.floor(Math.random() * 100);
+            this.worldMap[startIdx] = { id: startIdx, type: 'player', owner: this.playerName, terrain: 'plain', x: startIdx%10, y: startIdx/10|0, isMain: true, buildings: [] };
+        },
+
+        // ===== 地圖互動 =====
+        isMyCell(cell) { return cell.owner === this.playerName; },
+
+        getCellBg(cell) {
+            if (cell.owner === this.playerName) return cell.isMain ? '#065f46' : '#164e3b';
+            if (cell.type === 'npc') return '#450a0a';
+            if (cell.type === 'player') return '#1e1b4b';
+            const m = { forest: '#052e16', mountain: '#1c1917', lake: '#0c1a4d', plain: '#0f172a' };
+            return m[cell.terrain] || '#0f172a';
+        },
+
+        getIcon(cell) {
+            if (cell.owner === this.playerName) return cell.isMain ? '🏰' : '🏯';
+            if (cell.type === 'npc') {
+                return cell.owner.includes('龍') ? '🐉' : cell.owner.includes('骷髏') ? '💀' : '👹';
+            }
+            if (cell.type === 'player') return '🏠';
+            return { forest:'🌲', mountain:'⛰️', lake:'💧', plain:'' }[cell.terrain] || '';
+        },
+
+        interact(cell) {
+            if (cell.owner === this.playerName) {
+                this.openTerritory(cell);
+                return;
+            }
+            const power = this.totalAttack;
+            const min = cell.type === 'npc' ? 80 : 30;
+            if (power < min) {
+                this.addLog(`❌ 兵力不足 (${power}/${min})，需先擴軍！`, 'text-orange-400');
+                return;
+            }
+            const targetName = cell.owner || `荒地(${cell.x},${cell.y})`;
+            if (confirm(`⚔️ 出兵攻打 ${targetName}？\n我方戰力: ${power}`)) {
+                this.executeAttack(cell, power);
+            }
+        },
+
+        executeAttack(cell, power) {
+            this.addLog(`🏹 大軍出征，攻向 ${cell.owner||'荒地'}...`, 'text-slate-400');
+            setTimeout(() => {
+                // 計算敵方防禦
+                let def = 0;
+                if (cell.type === 'npc') {
+                    def = cell.owner.includes('龍') ? 500 : cell.owner.includes('骷髏') ? 350 : 180;
+                } else if (cell.type === 'player') {
+                    def = 200;
+                } else {
+                    def = 20;
+                }
+                // 領地防禦加成
+                def += this.getTerritoryDef(cell);
+
+                const ratio = power / def;
+                if (ratio >= 1) {
+                    // 勝利！
+                    const loot = { wood: Math.floor(ratio * 150), clay: Math.floor(ratio * 100), iron: Math.floor(ratio * 80), wheat: Math.floor(ratio * 200) };
+                    Object.keys(loot).forEach(k => this.resources[k].amount += loot[k]);
+                    const expGain = 30 + (this.buildings.find(b=>b.id==='academy')?.level||0)*20;
+                    this.hero.exp += expGain;
+                    this.hero.leadership = Math.min(this.hero.leadership + 0.1, 10);
+
+                    // 佔領！（任何地塊都能佔領）
+                    const oldOwner = cell.owner;
+                    cell.owner = this.playerName;
+                    cell.type = 'player';
+                    if (!cell.buildings) cell.buildings = [];
+
+                    this.addLog(`🏆 大捷！佔領 (${cell.x},${cell.y})！掠奪 🪵${loot.wood} 🌾${loot.wheat}`, 'text-green-400 font-black');
+                    this.addLog(`✨ 英雄獲得 +${expGain} 經驗值`, 'text-yellow-400');
+
+                    // 損兵（按比例）
+                    if (ratio < 2) this.takeCasualties(0.2);
+
+                    this.checkHeroLevel();
+                } else {
+                    // 失敗
+                    const lossRate = Math.min(0.7, (def - power) / def);
+                    this.takeCasualties(lossRate);
+                    this.addLog(`💀 戰敗！損失了 ${Math.floor(lossRate*100)}% 的部隊。`, 'text-red-500 font-black');
+                }
+            }, 1800);
+        },
+
+        takeCasualties(rate) {
+            Object.keys(this.troops).forEach(k => {
+                this.troops[k] = Math.floor(this.troops[k] * (1 - rate));
+            });
+        },
+
+        // ===== 領地管理 =====
+        openTerritory(cell) {
+            this.selectedTerritory = cell;
+            this.showTerritoryPanel = true;
+            this.territoryTab = 'build';
+        },
+
+        abandonTerritory(cell) {
+            if (cell.isMain) { alert('無法放棄主城！'); return; }
+            if (!confirm(`確定放棄 (${cell.x},${cell.y}) 的領地？`)) return;
+            cell.owner = '';
+            cell.type = 'wild';
+            cell.buildings = [];
+            this.showTerritoryPanel = false;
+            this.addLog(`🚩 放棄了領地 (${cell.x},${cell.y})`, 'text-slate-400');
+        },
+
+        getTerritoryBuilding(territory, buildId) {
+            if (!territory.buildings) return 0;
+            const b = territory.buildings.find(b => b.id === buildId);
+            return b ? b.count : 0;
+        },
+
+        getTerritoryBuildCost(b) {
+            const existing = this.selectedTerritory ? this.getTerritoryBuilding(this.selectedTerritory, b.id) : 0;
+            return Math.floor(b.baseCost * Math.pow(1.5, existing));
+        },
+
+        buildInTerritory(territory, buildType) {
+            const cost = this.getTerritoryBuildCost(buildType);
+            if (this.resources.wheat.amount < cost) return;
+            this.resources.wheat.amount -= cost;
+            if (!territory.buildings) territory.buildings = [];
+            const existing = territory.buildings.find(b => b.id === buildType.id);
+            if (existing) existing.count++;
+            else territory.buildings.push({ id: buildType.id, count: 1 });
+            this.addLog(`🏗️ 在 (${territory.x},${territory.y}) 建造了 ${buildType.emoji}${buildType.name}`, 'text-blue-400');
+        },
+
+        getTerritoryLevel(territory) {
+            if (!territory.buildings) return 0;
+            return territory.buildings.reduce((s, b) => s + b.count, 0);
+        },
+
+        getTerritoryDef(territory) {
+            if (!territory.buildings) return 0;
+            let def = 0;
+            territory.buildings.forEach(b => {
+                if (b.id === 'outpost') def += 30 * b.count;
+                if (b.id === 'fortwall') def += 50 * b.count;
+            });
+            return def;
+        },
+
+        getTerritoryResourceBonus(territory) {
+            if (!territory.buildings) return 0;
+            return territory.buildings.filter(b => b.id === 'tresfield').reduce((s, b) => s + 3 * b.count, 0);
+        },
+
+        getBuildingEmoji(id) {
+            const m = { outpost:'🏯', tresfield:'🌱', fortwall:'🧱', barrackout:'⛺' };
+            return m[id] || '🏗️';
+        },
+        getBuildingName(id) {
+            const found = this.territoryBuildingTypes.find(b => b.id === id);
+            return found ? found.name : id;
+        },
+
+        // ===== 主城建設 =====
+        upgrade(b) {
+            if (this.resources.wheat.amount < b.cost) return;
+            if (b.maxLevel && b.level >= b.maxLevel) return;
+            this.resources.wheat.amount -= b.cost;
+            b.level++;
+            b.cost = Math.floor(b.cost * 1.8);
+
+            // 效果
+            if (b.id === 'farm') this.resources.wheat.rate += 5;
+            if (b.id === 'sawmill') this.resources.wood.rate += 5;
+            if (b.id === 'ironmine') this.resources.iron.rate += 5;
+
+            this.addLog(`🏗️ ${b.emoji}${b.name} 升至 Lv.${b.level}`, 'text-blue-400');
+        },
+
+        // ===== 軍事 =====
+        isTroopUnlocked(t) {
+            if (!t.requires) return true;
+            const [bId, lvl] = t.requires.split(':');
+            const b = this.buildings.find(x => x.id === bId);
+            return b && b.level >= parseInt(lvl);
+        },
+
+        canTrain(t) {
+            return this.resources.iron.amount >= t.cost && this.isTroopUnlocked(t);
+        },
+
+        train(t) {
+            if (!this.canTrain(t)) return;
+            this.resources.iron.amount -= t.cost;
+            this.troops[t.id] = (this.troops[t.id]||0) + 1;
+            this.addLog(`⚔️ 招募了一名 ${t.emoji}${t.name}`, 'text-red-400');
+        },
+
+        // ===== 英雄 =====
+        checkHeroLevel() {
+            const need = this.hero.level * 120;
+            if (this.hero.exp >= need) {
+                this.hero.level++;
+                this.hero.atk += 25;
+                this.hero.exp -= need;
+                // 技能
+                const skills = ['精準打擊', '鐵壁防禦', '迅捷突擊', '資源掠奪者', '百戰精兵'];
+                if (this.hero.level % 2 === 0 && skills[this.hero.level/2-1]) {
+                    this.hero.skills.push(skills[this.hero.level/2-1]);
+                }
+                this.addLog(`✨ 英雄升至 Lv.${this.hero.level}！攻擊力+25`, 'text-yellow-400 font-bold');
+            }
+        },
+
+        // ===== 資源計算 =====
+        totalRate(k) {
+            let base = this.resources[k].rate;
+            // 領地資源加成
+            if (k === 'wheat' || k === 'wood' || k === 'iron') {
+                this.myTerritories.forEach(t => {
+                    if (t.buildings) {
+                        t.buildings.filter(b => b.id === 'tresfield').forEach(b => { base += 3 * b.count; });
+                    }
+                    // 地形加成
+                    if (k === 'wood' && t.terrain === 'forest') base += 2;
+                    if (k === 'iron' && t.terrain === 'mountain') base += 2;
+                    if (k === 'wheat' && t.terrain === 'lake') base += 2;
+                });
+            }
+            return base;
+        },
+
+        // ===== 遊戲循環 =====
+        startLoop() {
+            setInterval(() => {
+                Object.keys(this.resources).forEach(k => {
+                    const rate = this.totalRate(k);
+                    this.resources[k].amount = Math.min(
+                        this.resources[k].amount + rate / 10,
+                        (this.buildings.find(b=>b.id==='warehouse')?.level||1) * 5000
+                    );
+                });
+                // 糧食維護
+                if (this.troopUpkeep > 0) {
+                    this.resources.wheat.amount = Math.max(0, this.resources.wheat.amount - this.troopUpkeep / 10);
+                }
+                // 隨機事件
+                if (Math.random() > 0.9995) this.triggerRandomEvent();
+            }, 100);
+        },
+
+        triggerRandomEvent() {
+            const evts = [
+                { msg: '🌟 豐收節！獲得 500 糧食', res: 'wheat', amt: 500 },
+                { msg: '⚒️ 發現礦脈！獲得 300 鐵礦', res: 'iron', amt: 300 },
+                { msg: '🪵 伐木大豐收！獲得 400 木材', res: 'wood', amt: 400 },
+                { msg: '🌧️ 暴雨洪水！損失 200 糧食', res: 'wheat', amt: -200 },
+                { msg: '🔥 野火！損失 200 木材', res: 'wood', amt: -200 },
+            ];
+            const e = evts[Math.floor(Math.random()*evts.length)];
+            this.resources[e.res].amount = Math.max(0, this.resources[e.res].amount + e.amt);
+            this.currentEvent = e.msg;
+            this.addLog(`[隨機事件] ${e.msg}`, 'text-purple-400');
+            setTimeout(() => { this.currentEvent = null; }, 8000);
+        },
+
+        // ===== 網路同步 =====
+        syncNetwork() {
+            const room = gun.get('travian_v5_' + this.roomId);
+            setInterval(() => {
+                const myCell = this.worldMap.find(c => c.owner === this.playerName && c.isMain);
+                if (!myCell) return;
+                room.get(this.playerName).put({
+                    name: this.playerName,
+                    idx: myCell.id,
+                    power: this.totalAttack,
+                    ts: Date.now()
+                });
+            }, 5000);
+
+            room.map().on((data, name) => {
+                if (!data || name === this.playerName) return;
+                if (Date.now() - data.ts < 20000) {
+                    const idx = this.players.findIndex(p => p.name === name);
+                    if (idx > -1) this.players[idx] = data; else this.players.push(data);
+                    if (this.worldMap[data.idx] && !this.isMyCell(this.worldMap[data.idx])) {
+                        this.worldMap[data.idx].owner = name;
+                        this.worldMap[data.idx].type = 'player';
+                    }
+                }
+            });
+        },
+
+        // ===== 日誌 =====
+        addLog(msg, color = 'text-slate-300') {
+            const time = new Date().toLocaleTimeString([], { hour:'2-digit', minute:'2-digit', second:'2-digit' });
+            this.logs.unshift({ time, msg, color });
+            if (this.logs.length > 80) this.logs.pop();
+        },
+
+        // ===== 存檔 =====
+        exportSave() {
+            const data = { resources: this.resources, buildings: this.buildings, hero: this.hero, troops: this.troops, playerName: this.playerName };
+            const blob = new Blob([JSON.stringify(data)], { type: 'application/json' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url; a.download = `travian2_${this.playerName}.json`; a.click();
+            this.addLog(`💾 存檔已匯出`, 'text-green-500');
+        },
+        triggerImport() { document.getElementById('importInput').click(); },
+        handleFileImport(event) {
+            const file = event.target.files[0];
+            if (!file) return;
+            const reader = new FileReader();
+            reader.onload = (e) => {
+                try {
+                    const data = JSON.parse(e.target.result);
+                    this.resources = data.resources;
+                    this.buildings = data.buildings;
+                    this.hero = data.hero;
+                    this.troops = data.troops;
+                    this.playerName = data.playerName;
+                    this.isJoined = true;
+                    this.initMap();
+                    this.startLoop();
+                    this.addLog(`🔄 存檔匯入成功！歡迎回來，${this.playerName}。`, 'text-green-400');
+                } catch { alert('存檔格式錯誤！'); }
+            };
+            reader.readAsText(file);
+        }
+    }
+}).mount('#app');
+</script>
+</body>
+</html>
